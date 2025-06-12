@@ -1,96 +1,105 @@
-;; Efficiency Measurement Contract
-;; Measures and tracks process efficiency metrics
+;; Bottleneck Identification Contract
+;; Identifies and tracks process bottlenecks
 
-(define-constant ERR_UNAUTHORIZED (err u300))
-(define-constant ERR_NOT_FOUND (err u301))
-(define-constant ERR_INVALID_METRIC (err u302))
+(define-constant ERR_UNAUTHORIZED (err u400))
+(define-constant ERR_NOT_FOUND (err u401))
+(define-constant ERR_INVALID_SEVERITY (err u402))
 
 ;; Data structures
-(define-map efficiency-metrics uint {
+(define-map bottlenecks uint {
     process-id: uint,
-    completion-time: uint,
-    resource-usage: uint,
-    quality-score: uint,
-    cost: uint,
-    measured-by: principal,
-    measured-at: uint
+    step-index: uint,
+    description: (string-ascii 200),
+    severity: uint, ;; 1-5 scale
+    impact-score: uint,
+    identified-by: principal,
+    identified-at: uint,
+    status: (string-ascii 20) ;; "open", "investigating", "resolved"
 })
 
-(define-map process-benchmarks uint {
-    target-completion-time: uint,
-    target-resource-usage: uint,
-    target-quality-score: uint,
-    target-cost: uint
+(define-map bottleneck-solutions uint {
+    bottleneck-id: uint,
+    solution: (string-ascii 300),
+    estimated-improvement: uint,
+    implementation-cost: uint,
+    proposed-by: principal,
+    proposed-at: uint
 })
 
-(define-data-var next-metric-id uint u1)
+(define-data-var next-bottleneck-id uint u1)
+(define-data-var next-solution-id uint u1)
 
-;; Record efficiency measurement
-(define-public (record-measurement (process-id uint) (completion-time uint) (resource-usage uint) (quality-score uint) (cost uint))
-    (let ((metric-id (var-get next-metric-id)))
+;; Identify a new bottleneck
+(define-public (identify-bottleneck (process-id uint) (step-index uint) (description (string-ascii 200)) (severity uint) (impact-score uint))
+    (let ((bottleneck-id (var-get next-bottleneck-id)))
         (begin
-            (asserts! (> completion-time u0) ERR_INVALID_METRIC)
-            (asserts! (<= quality-score u100) ERR_INVALID_METRIC)
+            (asserts! (and (>= severity u1) (<= severity u5)) ERR_INVALID_SEVERITY)
+            (asserts! (<= impact-score u100) ERR_INVALID_SEVERITY)
 
-            (map-set efficiency-metrics metric-id {
+            (map-set bottlenecks bottleneck-id {
                 process-id: process-id,
-                completion-time: completion-time,
-                resource-usage: resource-usage,
-                quality-score: quality-score,
-                cost: cost,
-                measured-by: tx-sender,
-                measured-at: block-height
+                step-index: step-index,
+                description: description,
+                severity: severity,
+                impact-score: impact-score,
+                identified-by: tx-sender,
+                identified-at: block-height,
+                status: "open"
             })
 
-            (var-set next-metric-id (+ metric-id u1))
-            (ok metric-id)
+            (var-set next-bottleneck-id (+ bottleneck-id u1))
+            (ok bottleneck-id)
         )
     )
 )
 
-;; Set process benchmarks
-(define-public (set-benchmark (process-id uint) (target-time uint) (target-resources uint) (target-quality uint) (target-cost uint))
-    (begin
-        (map-set process-benchmarks process-id {
-            target-completion-time: target-time,
-            target-resource-usage: target-resources,
-            target-quality-score: target-quality,
-            target-cost: target-cost
-        })
-        (ok true)
+;; Propose solution for bottleneck
+(define-public (propose-solution (bottleneck-id uint) (solution (string-ascii 300)) (estimated-improvement uint) (implementation-cost uint))
+    (let ((solution-id (var-get next-solution-id)))
+        (begin
+            (asserts! (is-some (map-get? bottlenecks bottleneck-id)) ERR_NOT_FOUND)
+
+            (map-set bottleneck-solutions solution-id {
+                bottleneck-id: bottleneck-id,
+                solution: solution,
+                estimated-improvement: estimated-improvement,
+                implementation-cost: implementation-cost,
+                proposed-by: tx-sender,
+                proposed-at: block-height
+            })
+
+            (var-set next-solution-id (+ solution-id u1))
+            (ok solution-id)
+        )
     )
 )
 
-;; Calculate efficiency score (0-100)
-(define-read-only (calculate-efficiency-score (metric-id uint))
-    (match (map-get? efficiency-metrics metric-id)
-        metric-data
-        (match (map-get? process-benchmarks (get process-id metric-data))
-            benchmark-data
-            (let (
-                (time-efficiency (if (> (get target-completion-time benchmark-data) u0)
-                    (/ (* (get target-completion-time benchmark-data) u100) (get completion-time metric-data))
-                    u0))
-                (resource-efficiency (if (> (get target-resource-usage benchmark-data) u0)
-                    (/ (* (get target-resource-usage benchmark-data) u100) (get resource-usage metric-data))
-                    u0))
-                (quality-efficiency (get quality-score metric-data))
-                (cost-efficiency (if (> (get target-cost benchmark-data) u0)
-                    (/ (* (get target-cost benchmark-data) u100) (get cost metric-data))
-                    u0))
-            )
-            (some (/ (+ time-efficiency resource-efficiency quality-efficiency cost-efficiency) u4)))
-            none
+;; Update bottleneck status
+(define-public (update-status (bottleneck-id uint) (new-status (string-ascii 20)))
+    (match (map-get? bottlenecks bottleneck-id)
+        bottleneck-data
+        (begin
+            (map-set bottlenecks bottleneck-id
+                (merge bottleneck-data {status: new-status}))
+            (ok true)
         )
-        none
+        ERR_NOT_FOUND
     )
 )
 
 ;; Read-only functions
-(define-read-only (get-metric (metric-id uint))
-    (map-get? efficiency-metrics metric-id)
+(define-read-only (get-bottleneck (bottleneck-id uint))
+    (map-get? bottlenecks bottleneck-id)
 )
 
-(define-read-only (get-benchmark (process-id uint))
-    (map-get? process-benchmarks process-id)
+(define-read-only (get-solution (solution-id uint))
+    (map-get? bottleneck-solutions solution-id)
+)
+
+(define-read-only (calculate-priority-score (bottleneck-id uint))
+    (match (map-get? bottlenecks bottleneck-id)
+        bottleneck-data
+        (some (* (get severity bottleneck-data) (get impact-score bottleneck-data)))
+        none
+    )
 )
